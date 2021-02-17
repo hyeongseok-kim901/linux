@@ -42,7 +42,7 @@ static int __exfat_write_inode(struct inode *inode, int sync)
 	exfat_set_volume_dirty(sb);
 
 	/* get the directory entry of given file or directory */
-	es = exfat_get_dentry_set(sb, &(ei->dir), ei->entry, ES_ALL_ENTRIES);
+	es = exfat_get_dentry_set(sb, &(ei->dir), ei->entry, ES_ALL_ENTRIES, 0);
 	if (!es)
 		return -EIO;
 	ep = exfat_get_dentry_cached(es, 0);
@@ -222,7 +222,7 @@ static int exfat_map_cluster(struct inode *inode, unsigned int clu_offset,
 			int err;
 
 			es = exfat_get_dentry_set(sb, &(ei->dir), ei->entry,
-				ES_ALL_ENTRIES);
+				ES_ALL_ENTRIES, 0);
 			if (!es)
 				return -EIO;
 			/* get stream entry */

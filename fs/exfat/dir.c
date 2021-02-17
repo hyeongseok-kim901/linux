@@ -34,7 +34,7 @@ static void exfat_get_uniname_from_ext_entry(struct super_block *sb,
 	int i;
 	struct exfat_entry_set_cache *es;
 
-	es = exfat_get_dentry_set(sb, p_dir, entry, ES_ALL_ENTRIES);
+	es = exfat_get_dentry_set(sb, p_dir, entry, ES_ALL_ENTRIES, 0);
 	if (!es)
 		return;
 
@@ -377,7 +377,7 @@ unsigned int exfat_get_entry_type(struct exfat_dentry *ep)
 	return TYPE_BENIGN_SEC;
 }
 
-static void exfat_set_entry_type(struct exfat_dentry *ep, unsigned int type)
+/*static*/ void exfat_set_entry_type(struct exfat_dentry *ep, unsigned int type)
 {
 	if (type == TYPE_UNUSED) {
 		ep->type = EXFAT_UNUSED;
@@ -413,7 +413,7 @@ static void exfat_init_stream_entry(struct exfat_dentry *ep,
 	ep->dentry.stream.size = cpu_to_le64(size);
 }
 
-static void exfat_init_name_entry(struct exfat_dentry *ep,
+/*static*/ void exfat_init_name_entry(struct exfat_dentry *ep,
 		unsigned short *uniname)
 {
 	int i;
@@ -562,6 +562,7 @@ int exfat_init_ext_entry(struct inode *inode, struct exfat_chain *p_dir,
 	return 0;
 }
 
+#if 0
 int exfat_remove_entries(struct inode *inode, struct exfat_chain *p_dir,
 		int entry, int order, int num_entries)
 {
@@ -583,6 +584,29 @@ int exfat_remove_entries(struct inode *inode, struct exfat_chain *p_dir,
 
 	return 0;
 }
+#else
+
+int exfat_remove_entries(struct inode *inode, struct exfat_chain *p_dir,
+		int entry, int order, int num_entries)
+{
+	int i;
+	struct exfat_entry_set_cache *es;
+
+	es = exfat_get_dentry_set(inode->i_sb, p_dir, entry, ES_ALL_ENTRIES, 0);
+	if (!es)
+		return -EIO;
+
+	trace_printk("exfat_trace : num_entries %s es->num_entries\n", (num_entries == es->num_entries)?"==":"!=");
+	for (i = order; i < es->num_entries; i++) {
+		struct exfat_dentry *ep = exfat_get_dentry_cached(es, i);
+		exfat_set_entry_type(ep, TYPE_DELETED);
+	}
+
+	es->modified = true;
+	exfat_free_dentry_set(es, IS_DIRSYNC(inode));
+	return 0;
+}
+#endif
 
 void exfat_update_dir_chksum_with_entry_set(struct exfat_entry_set_cache *es)
 {
@@ -814,7 +838,7 @@ struct exfat_dentry *exfat_get_dentry_cached(
  *   NULL on failure.
  */
 struct exfat_entry_set_cache *exfat_get_dentry_set(struct super_block *sb,
-		struct exfat_chain *p_dir, int entry, unsigned int type)
+		struct exfat_chain *p_dir, int entry, unsigned int type, int force_ent_cnt)
 {
 	int ret, i, num_bh;
 	unsigned int off, byte_offset, clu = 0;
@@ -826,6 +850,8 @@ struct exfat_entry_set_cache *exfat_get_dentry_set(struct super_block *sb,
 	enum exfat_validate_dentry_mode mode = ES_MODE_STARTED;
 	struct buffer_head *bh;
 
+	unsigned int start_clu = 0;
+
 	if (p_dir->dir == DIR_DELETED) {
 		exfat_err(sb, "access to deleted dentry");
 		return NULL;
@@ -835,6 +861,8 @@ struct exfat_entry_set_cache *exfat_get_dentry_set(struct super_block *sb,
 	ret = exfat_walk_fat_chain(sb, p_dir, byte_offset, &clu);
 	if (ret)
 		return NULL;
+
+	start_clu = clu;
 
 	es = kzalloc(sizeof(*es), GFP_KERNEL);
 	if (!es)
@@ -858,12 +886,17 @@ struct exfat_entry_set_cache *exfat_get_dentry_set(struct super_block *sb,
 		goto free_es;
 	es->bh[es->num_bh++] = bh;
 
-	ep = exfat_get_dentry_cached(es, 0);
-	if (!exfat_validate_entry(exfat_get_entry_type(ep), &mode))
-		goto free_es;
+	if (!force_ent_cnt) {
+		ep = exfat_get_dentry_cached(es, 0);
+		if (!exfat_validate_entry(exfat_get_entry_type(ep), &mode))
+			goto free_es;
+	}
+	if (force_ent_cnt > 0)
+		num_entries = force_ent_cnt;
+	else
+		num_entries = type == ES_ALL_ENTRIES ?
+			ep->dentry.file.num_ext + 1 : type;
 
-	num_entries = type == ES_ALL_ENTRIES ?
-		ep->dentry.file.num_ext + 1 : type;
 	es->num_entries = num_entries;
 
 	num_bh = EXFAT_B_TO_BLK_ROUND_UP(off + num_entries * DENTRY_SIZE, sb);
@@ -886,10 +919,12 @@ struct exfat_entry_set_cache *exfat_get_dentry_set(struct super_block *sb,
 	}
 
 	/* validiate cached dentries */
-	for (i = 1; i < num_entries; i++) {
-		ep = exfat_get_dentry_cached(es, i);
-		if (!exfat_validate_entry(exfat_get_entry_type(ep), &mode))
-			goto free_es;
+	if (!force_ent_cnt) {
+		for (i = 1; i < num_entries; i++) {
+			ep = exfat_get_dentry_cached(es, i);
+			if (!exfat_validate_entry(exfat_get_entry_type(ep), &mode))
+				goto free_es;
+		}
 	}
 	return es;
 

@@ -306,7 +306,7 @@ static int exfat_find_empty_entry(struct inode *inode,
 {
 	int dentry;
 	unsigned int ret, last_clu;
-	sector_t sector;
+//	sector_t sector;
 	loff_t size = 0;
 	struct exfat_chain clu;
 	struct exfat_dentry *ep = NULL;
@@ -376,6 +376,7 @@ static int exfat_find_empty_entry(struct inode *inode,
 
 		/* update the directory entry */
 		if (p_dir->dir != sbi->root_dir) {
+#if 0
 			struct buffer_head *bh;
 
 			ep = exfat_get_dentry(sb,
@@ -391,6 +392,19 @@ static int exfat_find_empty_entry(struct inode *inode,
 			if (exfat_update_dir_chksum(inode, &(ei->dir),
 			    ei->entry))
 				return -EIO;
+#else
+			struct exfat_entry_set_cache *es = NULL;
+			es = exfat_get_dentry_set(sb, &(ei->dir), ei->entry, ES_ALL_ENTRIES, 0);
+			if (!es)
+				return -EIO;
+			ep = exfat_get_dentry_cached(es, 1);
+			ep->dentry.stream.valid_size = cpu_to_le64(size);
+			ep->dentry.stream.size = ep->dentry.stream.valid_size;
+			ep->dentry.stream.flags = p_dir->flags;
+			exfat_update_dir_chksum_with_entry_set(es);
+			if (exfat_free_dentry_set(es, IS_DIRSYNC(inode)))
+				return -EIO;
+#endif
 		}
 
 		/* directory inode should be updated in here */
@@ -628,7 +642,7 @@ static int exfat_find(struct inode *dir, struct qstr *qname,
 	info->entry = dentry;
 	info->num_subdirs = 0;
 
-	es = exfat_get_dentry_set(sb, &cdir, dentry, ES_2_ENTRIES);
+	es = exfat_get_dentry_set(sb, &cdir, dentry, ES_2_ENTRIES, 0);
 	if (!es)
 		return -EIO;
 	ep = exfat_get_dentry_cached(es, 0);
@@ -992,6 +1006,7 @@ unlock:
 	return err;
 }
 
+#if 0
 static int exfat_rename_file(struct inode *inode, struct exfat_chain *p_dir,
 		int oldentry, struct exfat_uni_name *p_uniname,
 		struct exfat_inode_info *ei)
@@ -1080,6 +1095,205 @@ static int exfat_rename_file(struct inode *inode, struct exfat_chain *p_dir,
 	return 0;
 }
 
+#else
+extern void exfat_init_name_entry(struct exfat_dentry *ep,
+		unsigned short *uniname);
+extern void exfat_set_entry_type(struct exfat_dentry *ep, unsigned int type);
+
+unsigned int exfat_ready_crash_rename = 0;
+unsigned int exfat_ready_crash_move = 0;
+static int exfat_rename_file(struct inode *inode, struct exfat_chain *p_dir,
+		int oldentry, struct exfat_uni_name *p_uniname,
+		struct exfat_inode_info *ei)
+{
+	int ret = 0, num_old_entries, num_new_entries;
+	sector_t sector_old/*, sector_new*/;
+	struct exfat_dentry *epold, *epnew;
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head /**new_bh,*/ *old_bh;
+	//int sync = IS_DIRSYNC(inode);
+	int i;
+	unsigned short *uniname = p_uniname->name;
+	//struct blk_plug plug;
+
+	struct exfat_entry_set_cache *es_old, *es_new;
+
+	epold = exfat_get_dentry(sb, p_dir, oldentry, &old_bh, &sector_old);
+	if (!epold)
+		return -EIO;
+
+	num_old_entries = exfat_count_ext_entries(sb, p_dir, oldentry, epold);
+	if (num_old_entries < 0)
+		return -EIO;
+	num_old_entries++;
+
+	num_new_entries = exfat_calc_num_entries(p_uniname);
+	if (num_new_entries < 0) {
+		return num_new_entries;
+	}
+
+	if (num_old_entries < num_new_entries) {
+		int newentry;
+
+		newentry =
+			exfat_find_empty_entry(inode, p_dir, num_new_entries);
+		if (newentry < 0)
+			return newentry; /* -EIO or -ENOSPC */
+
+		es_old = exfat_get_dentry_set(sb, p_dir, oldentry, ES_ALL_ENTRIES, 0);
+		if (!es_old)
+			return -EIO;
+
+		es_new = exfat_get_dentry_set(sb, p_dir, newentry, ES_ALL_ENTRIES, num_new_entries);
+		if (!es_new) {
+			exfat_free_dentry_set(es_old, false);
+			return -EIO;
+		}
+
+		epold = exfat_get_dentry_cached(es_old, 0);
+		epnew = exfat_get_dentry_cached(es_new, 0);
+/*
+		epnew = exfat_get_dentry(sb, p_dir, newentry, &new_bh,
+			&sector_new);
+		if (!epnew)
+			return -EIO;
+*/
+		memcpy(epnew, epold, DENTRY_SIZE);
+		if (exfat_get_entry_type(epnew) == TYPE_FILE) {
+			epnew->dentry.file.attr |= cpu_to_le16(ATTR_ARCHIVE);
+			ei->attr |= ATTR_ARCHIVE;
+		}
+		epnew->dentry.file.num_ext = (unsigned char)(num_new_entries - 1);
+/*
+		exfat_update_bh(new_bh, sync);
+		brelse(old_bh);
+		brelse(new_bh);
+*/
+		epold = exfat_get_dentry_cached(es_old, 1);
+		epnew = exfat_get_dentry_cached(es_new, 1);
+/*
+		epold = exfat_get_dentry(sb, p_dir, oldentry + 1, &old_bh,
+			&sector_old);
+		if (!epold)
+			return -EIO;
+		epnew = exfat_get_dentry(sb, p_dir, newentry + 1, &new_bh,
+			&sector_new);
+		if (!epnew) {
+			brelse(old_bh);
+			return -EIO;
+		}
+*/
+		memcpy(epnew, epold, DENTRY_SIZE);
+		epnew->dentry.stream.name_len = p_uniname->name_len;
+		epnew->dentry.stream.name_hash = cpu_to_le16(p_uniname->name_hash);
+/*
+		exfat_update_bh(new_bh, sync);
+		brelse(old_bh);
+		brelse(new_bh);
+*/
+
+#if 0
+		ret = exfat_init_ext_entry(inode, p_dir, newentry,
+			num_new_entries, p_uniname);
+		if (ret)
+			return ret;
+#else
+		for (i = 2; i < num_new_entries; i++) {
+			epnew = exfat_get_dentry_cached(es_new, i);
+
+			exfat_init_name_entry(epnew, uniname);
+			uniname += EXFAT_FILE_NAME_LEN;
+		}
+
+		exfat_update_dir_chksum_with_entry_set(es_new);
+
+		es_new->modified = true;
+//		exfat_free_dentry_set(es_new, IS_DIRSYNC(inode));
+#endif
+
+#if 0
+		exfat_remove_entries(inode, p_dir, oldentry, 0,
+			num_old_entries);
+#else
+		for (i = 0; i < es_old->num_entries; i++) {
+			struct exfat_dentry *ep = exfat_get_dentry_cached(es_old, i);
+			exfat_set_entry_type(ep, TYPE_DELETED);
+		}
+
+		es_old->modified = true;
+//		exfat_free_dentry_set(es_old, IS_DIRSYNC(inode));
+#endif
+		exfat_ready_crash_rename += 2;
+		exfat_free_dentry_set(es_new, IS_DIRSYNC(inode));
+		exfat_ready_crash_rename --;
+		exfat_free_dentry_set(es_old, IS_DIRSYNC(inode));
+		exfat_ready_crash_rename --;
+
+		ei->entry = newentry;
+	} else {
+
+		es_old = exfat_get_dentry_set(sb, p_dir, oldentry, ES_ALL_ENTRIES, 0);
+		if (!es_old)
+			return -EIO;
+		epold = exfat_get_dentry_cached(es_old, 0);
+
+		if (exfat_get_entry_type(epold) == TYPE_FILE) {
+			epold->dentry.file.attr |= cpu_to_le16(ATTR_ARCHIVE);
+			ei->attr |= ATTR_ARCHIVE;
+		}
+		epold->dentry.file.num_ext = (unsigned char)(num_new_entries - 1);
+/*
+		exfat_update_bh(old_bh, sync);
+		brelse(old_bh);
+*/
+		epold = exfat_get_dentry_cached(es_old, 1);
+		epold->dentry.stream.name_len = p_uniname->name_len;
+		epold->dentry.stream.name_hash = cpu_to_le16(p_uniname->name_hash);
+#if 0
+		ret = exfat_init_ext_entry(inode, p_dir, oldentry,
+			num_new_entries, p_uniname);
+		if (ret)
+			return ret;
+#else
+		for (i = 2; i < num_new_entries; i++) {
+			epold = exfat_get_dentry_cached(es_old, i);
+
+			exfat_init_name_entry(epold, uniname);
+			uniname += EXFAT_FILE_NAME_LEN;
+		}
+		/* clear rest of the entry not to become a garbage */
+/*
+		for (i = num_new_entries; i < num_old_entries; i++) {
+			epold = exfat_get_dentry_cached(es_old, i);
+			memset(epold, 0x0, DENTRY_SIZE);
+		}
+*/
+/* remove entries first to decrease es_old->num_entries */
+		for (i = num_new_entries; i < es_old->num_entries; i++) {
+			epold = exfat_get_dentry_cached(es_old, i);
+			exfat_set_entry_type(epold, TYPE_DELETED);
+		}
+
+		es_old->num_entries = num_new_entries;
+		exfat_update_dir_chksum_with_entry_set(es_old);
+#endif
+
+#if 0
+		exfat_remove_entries(inode, p_dir, oldentry, num_new_entries,
+			num_old_entries);
+#endif
+
+		es_old->modified = true;
+		exfat_ready_crash_rename += 1;
+		exfat_free_dentry_set(es_old, IS_DIRSYNC(inode));
+		exfat_ready_crash_rename --;
+
+	}
+	return ret;
+}
+#endif
+
+#if 0
 static int exfat_move_file(struct inode *inode, struct exfat_chain *p_olddir,
 		int oldentry, struct exfat_chain *p_newdir,
 		struct exfat_uni_name *p_uniname, struct exfat_inode_info *ei)
@@ -1150,6 +1364,115 @@ static int exfat_move_file(struct inode *inode, struct exfat_chain *p_olddir,
 	ei->entry = newentry;
 	return 0;
 }
+#else
+static int exfat_move_file(struct inode *inode, struct exfat_chain *p_olddir,
+		int oldentry, struct exfat_chain *p_newdir,
+		struct exfat_uni_name *p_uniname, struct exfat_inode_info *ei)
+{
+	int ret = 0, newentry, num_new_entries, num_old_entries;
+	sector_t sector_mov/*, sector_new*/;
+	struct exfat_dentry *epmov, *epnew;
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head *mov_bh/*, *new_bh*/;
+	int i;
+	unsigned short *uniname = p_uniname->name;
+
+	struct exfat_entry_set_cache *es_mov, *es_new;
+
+	epmov = exfat_get_dentry(sb, p_olddir, oldentry, &mov_bh, &sector_mov);
+	if (!epmov)
+		return -EIO;
+
+	/* check if the source and target directory is the same */
+	if (exfat_get_entry_type(epmov) == TYPE_DIR &&
+	    le32_to_cpu(epmov->dentry.stream.start_clu) == p_newdir->dir)
+		return -EINVAL;
+
+	num_old_entries = exfat_count_ext_entries(sb, p_olddir, oldentry,
+		epmov);
+	if (num_old_entries < 0)
+		return -EIO;
+	num_old_entries++;
+
+	num_new_entries = exfat_calc_num_entries(p_uniname);
+	if (num_new_entries < 0)
+		return num_new_entries;
+
+	newentry = exfat_find_empty_entry(inode, p_newdir, num_new_entries);
+	if (newentry < 0)
+		return newentry; /* -EIO or -ENOSPC */
+
+	es_mov = exfat_get_dentry_set(sb, p_olddir, oldentry, ES_ALL_ENTRIES, 0);
+	if (!es_mov)
+		return -EIO;
+
+	es_new = exfat_get_dentry_set(sb, p_newdir, newentry, ES_ALL_ENTRIES, num_new_entries);
+	if (!es_new) {
+		exfat_free_dentry_set(es_mov, IS_DIRSYNC(inode));
+		return -EIO;
+	}
+
+	epmov = exfat_get_dentry_cached(es_mov, 0);
+	epnew = exfat_get_dentry_cached(es_new, 0);
+
+	memcpy(epnew, epmov, DENTRY_SIZE);
+	if (exfat_get_entry_type(epnew) == TYPE_FILE) {
+		epnew->dentry.file.attr |= cpu_to_le16(ATTR_ARCHIVE);
+		ei->attr |= ATTR_ARCHIVE;
+	}
+	epnew->dentry.file.num_ext = (unsigned char)(num_new_entries - 1);
+
+	epmov = exfat_get_dentry_cached(es_mov, 1);
+	epnew = exfat_get_dentry_cached(es_new, 1);
+
+	memcpy(epnew, epmov, DENTRY_SIZE);
+	epnew->dentry.stream.name_len = p_uniname->name_len;
+	epnew->dentry.stream.name_hash = cpu_to_le16(p_uniname->name_hash);
+
+#if 0
+	ret = exfat_init_ext_entry(inode, p_newdir, newentry, num_new_entries,
+		p_uniname);
+	if (ret)
+		return ret;
+#else
+	for (i = 2; i < num_new_entries; i++) {
+		epnew = exfat_get_dentry_cached(es_new, i);
+
+		exfat_init_name_entry(epnew, uniname);
+		uniname += EXFAT_FILE_NAME_LEN;
+	}
+
+	exfat_update_dir_chksum_with_entry_set(es_new);
+
+	es_new->modified = true;
+//	exfat_free_dentry_set(es_new, IS_DIRSYNC(inode));
+#endif
+
+#if 0
+	exfat_remove_entries(inode, p_olddir, oldentry, 0, num_old_entries);
+#else
+	for (i = 0; i < es_mov->num_entries; i++) {
+		struct exfat_dentry *ep = exfat_get_dentry_cached(es_mov, i);
+		exfat_set_entry_type(ep, TYPE_DELETED);
+	}
+
+	es_mov->modified = true;
+//	exfat_free_dentry_set(es_mov, IS_DIRSYNC(inode));
+#endif
+
+	exfat_ready_crash_move += 2;
+	exfat_free_dentry_set(es_new, IS_DIRSYNC(inode));
+	exfat_ready_crash_move --;
+	exfat_free_dentry_set(es_mov, IS_DIRSYNC(inode));
+	exfat_ready_crash_move --;
+
+	exfat_chain_set(&ei->dir, p_newdir->dir, p_newdir->size,
+		p_newdir->flags);
+
+	ei->entry = newentry;
+	return ret;
+}
+#endif
 
 static void exfat_update_parent_info(struct exfat_inode_info *ei,
 		struct inode *parent_inode)

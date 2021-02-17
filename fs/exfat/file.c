@@ -157,7 +157,7 @@ int __exfat_truncate(struct inode *inode, loff_t new_size)
 		int err;
 
 		es = exfat_get_dentry_set(sb, &(ei->dir), ei->entry,
-				ES_ALL_ENTRIES);
+				ES_ALL_ENTRIES, 0);
 		if (!es)
 			return -EIO;
 		ep = exfat_get_dentry_cached(es, 0);
@@ -189,7 +189,8 @@ int __exfat_truncate(struct inode *inode, loff_t new_size)
 		}
 
 		exfat_update_dir_chksum_with_entry_set(es);
-		err = exfat_free_dentry_set(es, inode_needs_sync(inode));
+		//err = exfat_free_dentry_set(es, inode_needs_sync(inode));
+		err = exfat_free_dentry_set(es, IS_DIRSYNC(inode));
 		if (err)
 			return err;
 	}
