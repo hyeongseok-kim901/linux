@@ -694,9 +694,13 @@ static int exfat_dir_readahead(struct super_block *sb, sector_t sec)
 		return -EIO;
 	}
 
-	/* Not sector aligned with ra_count, resize ra_count to page size */
+	/*
+	 * if sector is not aligned with ra_count, resize ra_count to read
+	 * to the end of the current cluster
+	 */
 	if ((sec - sbi->data_start_sector) & (ra_count - 1))
-		ra_count = page_ra_count;
+		if (ra_count > (sec & (sbi->sect_per_clus-1)))
+			ra_count = ra_count - (sec & (sbi->sect_per_clus-1));
 
 	bh = sb_find_get_block(sb, sec);
 	if (!bh || !buffer_uptodate(bh)) {
@@ -725,8 +729,7 @@ struct exfat_dentry *exfat_get_dentry(struct super_block *sb,
 	if (exfat_find_location(sb, p_dir, entry, &sec, &off))
 		return NULL;
 
-	if (p_dir->dir != EXFAT_FREE_CLUSTER &&
-			!(entry & (dentries_per_page - 1)))
+	if (p_dir->dir != EXFAT_FREE_CLUSTER)
 		exfat_dir_readahead(sb, sec);
 
 	*bh = sb_bread(sb, sec);
