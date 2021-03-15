@@ -33,8 +33,9 @@ enum {
 	NLS_NAME_OVERLEN,	/* the length is over than its limit */
 };
 
-#define EXFAT_HASH_BITS		8
-#define EXFAT_HASH_SIZE		(1UL << EXFAT_HASH_BITS)
+#define MIN_EXFAT_HASH_BITS		8
+#define MAX_EXFAT_HASH_BITS		14
+#define EXFAT_HASH_SIZE(hash_bit)	(1UL << hash_bit)
 
 /*
  * Type Definitions
@@ -206,6 +207,7 @@ struct exfat_mount_options {
 	unsigned utf8:1, /* Use of UTF-8 character set */
 		 discard:1; /* Issue discard requests on deletions */
 	int time_offset; /* Offset of timestamps from UTC (in minutes) */
+	unsigned int hash_bit; /* inode_hashtable size definition */
 };
 
 /*
@@ -243,7 +245,7 @@ struct exfat_sb_info {
 	struct ratelimit_state ratelimit;
 
 	spinlock_t inode_hash_lock;
-	struct hlist_head inode_hashtable[EXFAT_HASH_SIZE];
+	struct hlist_head *inode_hashtable;
 
 	struct rcu_head rcu;
 };

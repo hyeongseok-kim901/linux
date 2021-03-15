@@ -24,6 +24,8 @@
 static char exfat_default_iocharset[] = CONFIG_EXFAT_DEFAULT_IOCHARSET;
 static struct kmem_cache *exfat_inode_cachep;
 
+static int exfat_hash_free(struct exfat_sb_info *sbi);
+
 static void exfat_free_iocharset(struct exfat_sb_info *sbi)
 {
 	if (sbi->options.iocharset != exfat_default_iocharset)
@@ -37,6 +39,7 @@ static void exfat_delayed_free(struct rcu_head *p)
 	unload_nls(sbi->nls_io);
 	exfat_free_iocharset(sbi);
 	exfat_free_upcase_table(sbi);
+	exfat_hash_free(sbi);
 	kfree(sbi);
 }
 
@@ -175,6 +178,7 @@ static int exfat_show_options(struct seq_file *m, struct dentry *root)
 		seq_puts(m, ",discard");
 	if (opts->time_offset)
 		seq_printf(m, ",time_offset=%d", opts->time_offset);
+	seq_printf(m, ",hash_bit=%u", opts->hash_bit);
 	return 0;
 }
 
@@ -217,6 +221,7 @@ enum {
 	Opt_errors,
 	Opt_discard,
 	Opt_time_offset,
+	Opt_hash_bit,
 
 	/* Deprecated options */
 	Opt_utf8,
@@ -243,6 +248,7 @@ static const struct fs_parameter_spec exfat_parameters[] = {
 	fsparam_enum("errors",			Opt_errors, exfat_param_enums),
 	fsparam_flag("discard",			Opt_discard),
 	fsparam_s32("time_offset",		Opt_time_offset),
+	fsparam_u32("hash_bit",			Opt_hash_bit),
 	__fsparam(NULL, "utf8",			Opt_utf8, fs_param_deprecated,
 		  NULL),
 	__fsparam(NULL, "debug",		Opt_debug, fs_param_deprecated,
@@ -305,6 +311,12 @@ static int exfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			return -EINVAL;
 		opts->time_offset = result.int_32;
 		break;
+	case Opt_hash_bit:
+		if (result.int_32 >= MIN_EXFAT_HASH_BITS && result.int_32 <= MAX_EXFAT_HASH_BITS)
+			opts->hash_bit = result.int_32;
+		else
+			opts->hash_bit = MIN_EXFAT_HASH_BITS;
+		break;
 	case Opt_utf8:
 	case Opt_debug:
 	case Opt_namecase:
@@ -317,14 +329,30 @@ static int exfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	return 0;
 }
 
-static void exfat_hash_init(struct super_block *sb)
+static int exfat_hash_init(struct super_block *sb)
 {
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
+	int hash_size = EXFAT_HASH_SIZE(sbi->options.hash_bit);
 	int i;
 
+	sbi->inode_hashtable =
+		kvzalloc(hash_size * sizeof(struct hlist_head), GFP_KERNEL);
+	if (!sbi->inode_hashtable)
+		return -ENOMEM;
+
 	spin_lock_init(&sbi->inode_hash_lock);
-	for (i = 0; i < EXFAT_HASH_SIZE; i++)
+	for (i = 0; i < hash_size; i++)
 		INIT_HLIST_HEAD(&sbi->inode_hashtable[i]);
+
+	return 0;
+}
+
+static void exfat_hash_free(struct exfat_sb_info *sbi)
+{
+	if (sbi->inode_hashtable) {
+		kvfree(sbi->inode_hashtable);
+		sbi->inode_hashtable = NULL;
+	}
 }
 
 static int exfat_read_root(struct inode *inode)
@@ -649,7 +677,11 @@ static int exfat_fill_super(struct super_block *sb, struct fs_context *fc)
 	}
 
 	/* set up enough so that it can read an inode */
-	exfat_hash_init(sb);
+	err = exfat_hash_init(sb);
+	if (err) {
+		exfat_err(sb, "failed to init hash table");
+		goto check_nls_io;
+	}
 
 	if (!strcmp(sbi->options.iocharset, "utf8"))
 		opts->utf8 = 1;
@@ -700,6 +732,7 @@ put_inode:
 	sb->s_root = NULL;
 
 free_table:
+	exfat_hash_free(sbi);
 	exfat_free_upcase_table(sbi);
 	exfat_free_bitmap(sbi);
 	brelse(sbi->boot_bh);

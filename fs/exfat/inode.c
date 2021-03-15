@@ -500,15 +500,16 @@ static const struct address_space_operations exfat_aops = {
 	.bmap		= exfat_aop_bmap
 };
 
-static inline unsigned long exfat_hash(loff_t i_pos)
+static inline unsigned long exfat_hash(loff_t i_pos, unsigned int hash_bit)
 {
-	return hash_32(i_pos, EXFAT_HASH_BITS);
+	return hash_32(i_pos, hash_bit);
 }
 
 void exfat_hash_inode(struct inode *inode, loff_t i_pos)
 {
 	struct exfat_sb_info *sbi = EXFAT_SB(inode->i_sb);
-	struct hlist_head *head = sbi->inode_hashtable + exfat_hash(i_pos);
+	struct hlist_head *head =
+		sbi->inode_hashtable + exfat_hash(i_pos, sbi->options.hash_bit);
 
 	spin_lock(&sbi->inode_hash_lock);
 	EXFAT_I(inode)->i_pos = i_pos;
@@ -530,7 +531,8 @@ struct inode *exfat_iget(struct super_block *sb, loff_t i_pos)
 {
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
 	struct exfat_inode_info *info;
-	struct hlist_head *head = sbi->inode_hashtable + exfat_hash(i_pos);
+	struct hlist_head *head =
+		sbi->inode_hashtable + exfat_hash(i_pos, sbi->options.hash_bit);
 	struct inode *inode = NULL;
 
 	spin_lock(&sbi->inode_hash_lock);
