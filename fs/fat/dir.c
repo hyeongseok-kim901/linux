@@ -465,18 +465,29 @@ int fat_search_long(struct inode *inode, const unsigned char *name,
 {
 	struct super_block *sb = inode->i_sb;
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	struct msdos_inode_info *ei = MSDOS_I(inode);
 	struct buffer_head *bh = NULL;
 	struct msdos_dir_entry *de;
 	unsigned char nr_slots;
 	wchar_t *unicode = NULL;
 	unsigned char bufname[FAT_MAX_SHORT_SIZE];
-	loff_t cpos = 0;
+	loff_t cpos = ei->hint_cpos;
+	bool rewinded = false;
 	int err, len;
 
 	err = -ENOENT;
 	while (1) {
-		if (fat_get_entry(inode, &cpos, &bh, &de) == -1)
+		if (rewinded && cpos == ei->hint_cpos)
 			goto end_of_dir;
+
+		if (fat_get_entry(inode, &cpos, &bh, &de) == -1) {
+			if (!rewinded) {
+				rewinded = true;
+				cpos = 0;
+				continue;
+			}
+			goto end_of_dir;
+		}
 parse_record:
 		nr_slots = 0;
 		if (de->name[0] == DELETED_FLAG)
@@ -495,8 +506,14 @@ parse_record:
 				continue;
 			else if (status == PARSE_NOT_LONGNAME)
 				goto parse_record;
-			else if (status == PARSE_EOF)
+			else if (status == PARSE_EOF) {
+				if (!rewinded) {
+					rewinded = true;
+					cpos = 0;
+					continue;
+				}
 				goto end_of_dir;
+			}
 		}
 
 		/* Never prepend '.' to hidden files here.
@@ -531,6 +548,7 @@ found:
 	sinfo->bh = bh;
 	sinfo->i_pos = fat_make_i_pos(sb, sinfo->bh, sinfo->de);
 	err = 0;
+	ei->hint_cpos = cpos;
 end_of_dir:
 	if (unicode)
 		__putname(unicode);

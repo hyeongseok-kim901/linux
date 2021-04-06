@@ -23,21 +23,26 @@ struct fat_fid {
 static struct inode *fat_dget(struct super_block *sb, int i_logstart)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	struct hlist_head *head;
+	struct rb_node *node = sbi->dir_tree.rb_node;
 	struct msdos_inode_info *i;
 	struct inode *inode = NULL;
 
-	head = sbi->dir_hashtable + fat_dir_hash(i_logstart);
-	spin_lock(&sbi->dir_hash_lock);
-	hlist_for_each_entry(i, head, i_dir_hash) {
+	spin_lock(&sbi->dir_tree_lock);
+	while (node) {
+		i = rb_entry(node, struct msdos_inode_info, d_rbnode);
 		BUG_ON(i->vfs_inode.i_sb != sb);
-		if (i->i_logstart != i_logstart)
-			continue;
-		inode = igrab(&i->vfs_inode);
-		if (inode)
-			break;
+		if (i_logstart == i->i_logstart) {
+			inode = igrab(&i->vfs_inode);
+			if (inode)
+				break;
+		}
+
+		if (i_logstart < i->i_logstart)
+			node = node->rb_left;
+		else
+			node = node->rb_right;
 	}
-	spin_unlock(&sbi->dir_hash_lock);
+	spin_unlock(&sbi->dir_tree_lock);
 	return inode;
 }
 

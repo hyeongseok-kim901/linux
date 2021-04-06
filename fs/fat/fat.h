@@ -54,9 +54,6 @@ struct fat_mount_options {
 		 dos1xfloppy:1;	   /* Assume default BPB for DOS 1.x floppies */
 };
 
-#define FAT_HASH_BITS	8
-#define FAT_HASH_SIZE	(1UL << FAT_HASH_BITS)
-
 /*
  * MS-DOS file system in-core superblock data
  */
@@ -94,11 +91,11 @@ struct msdos_sb_info {
 
 	struct ratelimit_state ratelimit;
 
-	spinlock_t inode_hash_lock;
-	struct hlist_head inode_hashtable[FAT_HASH_SIZE];
+	spinlock_t inode_tree_lock;	/* lock for inode_tree */
+	struct rb_root inode_tree;
 
-	spinlock_t dir_hash_lock;
-	struct hlist_head dir_hashtable[FAT_HASH_SIZE];
+	spinlock_t dir_tree_lock;	/* lock for dir_tree */
+	struct rb_root dir_tree;
 
 	unsigned int dirty;           /* fs state before mount */
 	struct rcu_head rcu;
@@ -123,10 +120,11 @@ struct msdos_inode_info {
 	int i_logstart;		/* logical first cluster */
 	int i_attrs;		/* unused attribute bits */
 	loff_t i_pos;		/* on-disk position of directory entry or 0 */
-	struct hlist_node i_fat_hash;	/* hash by i_location */
-	struct hlist_node i_dir_hash;	/* hash by i_logstart */
+	struct rb_node i_rbnode;	/* tree by i_location */
+	struct rb_node d_rbnode;	/* tree by i_location */
 	struct rw_semaphore truncate_lock; /* protect bmap against truncate */
 	struct inode vfs_inode;
+	loff_t hint_cpos;	/* last referenced cpos offset for hint */
 };
 
 struct fat_slot_info {
@@ -260,11 +258,11 @@ static inline loff_t fat_i_pos_read(struct msdos_sb_info *sbi,
 {
 	loff_t i_pos;
 #if BITS_PER_LONG == 32
-	spin_lock(&sbi->inode_hash_lock);
+	spin_lock(&sbi->inode_tree_lock);
 #endif
 	i_pos = MSDOS_I(inode)->i_pos;
 #if BITS_PER_LONG == 32
-	spin_unlock(&sbi->inode_hash_lock);
+	spin_unlock(&sbi->inode_tree_lock);
 #endif
 	return i_pos;
 }
@@ -420,10 +418,6 @@ extern int fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de);
 
 extern int fat_flush_inodes(struct super_block *sb, struct inode *i1,
 			    struct inode *i2);
-static inline unsigned long fat_dir_hash(int logstart)
-{
-	return hash_32(logstart, FAT_HASH_BITS);
-}
 extern int fat_add_cluster(struct inode *inode);
 
 /* fat/misc.c */

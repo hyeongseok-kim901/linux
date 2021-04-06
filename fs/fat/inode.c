@@ -376,43 +376,55 @@ static const struct address_space_operations fat_aops = {
  *			and consider negative result as cache miss.
  */
 
-static void fat_hash_init(struct super_block *sb)
+static void fat_inode_tree_init(struct super_block *sb)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	int i;
 
-	spin_lock_init(&sbi->inode_hash_lock);
-	for (i = 0; i < FAT_HASH_SIZE; i++)
-		INIT_HLIST_HEAD(&sbi->inode_hashtable[i]);
+	spin_lock_init(&sbi->inode_tree_lock);
+	sbi->inode_tree = RB_ROOT;
 }
 
-static inline unsigned long fat_hash(loff_t i_pos)
-{
-	return hash_32(i_pos, FAT_HASH_BITS);
-}
-
-static void dir_hash_init(struct super_block *sb)
+static void fat_dir_tree_init(struct super_block *sb)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	int i;
 
-	spin_lock_init(&sbi->dir_hash_lock);
-	for (i = 0; i < FAT_HASH_SIZE; i++)
-		INIT_HLIST_HEAD(&sbi->dir_hashtable[i]);
+	spin_lock_init(&sbi->dir_tree_lock);
+	sbi->dir_tree = RB_ROOT;
 }
 
 void fat_attach(struct inode *inode, loff_t i_pos)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(inode->i_sb);
+	struct msdos_inode_info *info, *ei = MSDOS_I(inode);
+	struct rb_root *root;
+	struct rb_node **rb_ptr;
+	struct rb_node *parent = NULL;
 
 	if (inode->i_ino != MSDOS_ROOT_INO) {
-		struct hlist_head *head =   sbi->inode_hashtable
-					  + fat_hash(i_pos);
+		root = &sbi->inode_tree;
+		rb_ptr = &root->rb_node;
 
-		spin_lock(&sbi->inode_hash_lock);
-		MSDOS_I(inode)->i_pos = i_pos;
-		hlist_add_head(&MSDOS_I(inode)->i_fat_hash, head);
-		spin_unlock(&sbi->inode_hash_lock);
+		spin_lock(&sbi->inode_tree_lock);
+		ei->i_pos = i_pos;
+		while (*rb_ptr) {
+			parent = *rb_ptr;
+			info = rb_entry(parent, struct msdos_inode_info, i_rbnode);
+			if (i_pos == info->i_pos) {
+				rb_replace_node(parent, &ei->i_rbnode, root);
+				RB_CLEAR_NODE(parent);
+				spin_unlock(&sbi->inode_tree_lock);
+				return;
+			}
+
+			if (i_pos < info->i_pos)
+				rb_ptr = &(*rb_ptr)->rb_left;
+			else
+				rb_ptr = &(*rb_ptr)->rb_right;
+		}
+
+		rb_link_node(&ei->i_rbnode, parent, rb_ptr);
+		rb_insert_color(&ei->i_rbnode, root);
+		spin_unlock(&sbi->inode_tree_lock);
 	}
 
 	/* If NFS support is enabled, cache the mapping of start cluster
@@ -420,12 +432,21 @@ void fat_attach(struct inode *inode, loff_t i_pos)
 	 * dentries to the filesystem root.
 	 */
 	if (S_ISDIR(inode->i_mode) && sbi->options.nfs) {
-		struct hlist_head *d_head = sbi->dir_hashtable;
-		d_head += fat_dir_hash(MSDOS_I(inode)->i_logstart);
+		root = &sbi->dir_tree;
+		rb_ptr = &root->rb_node;
 
-		spin_lock(&sbi->dir_hash_lock);
-		hlist_add_head(&MSDOS_I(inode)->i_dir_hash, d_head);
-		spin_unlock(&sbi->dir_hash_lock);
+		spin_lock(&sbi->dir_tree_lock);
+		while (*rb_ptr) {
+			parent = *rb_ptr;
+			info = rb_entry(parent, struct msdos_inode_info, d_rbnode);
+			if (ei->i_logstart < info->i_logstart)
+				rb_ptr = &(*rb_ptr)->rb_left;
+			else
+				rb_ptr = &(*rb_ptr)->rb_right;
+		}
+		rb_link_node(&ei->d_rbnode, parent, rb_ptr);
+		rb_insert_color(&ei->d_rbnode, root);
+		spin_unlock(&sbi->dir_tree_lock);
 	}
 }
 EXPORT_SYMBOL_GPL(fat_attach);
@@ -433,15 +454,25 @@ EXPORT_SYMBOL_GPL(fat_attach);
 void fat_detach(struct inode *inode)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(inode->i_sb);
-	spin_lock(&sbi->inode_hash_lock);
-	MSDOS_I(inode)->i_pos = 0;
-	hlist_del_init(&MSDOS_I(inode)->i_fat_hash);
-	spin_unlock(&sbi->inode_hash_lock);
+	struct msdos_inode_info *ei = MSDOS_I(inode);
+	struct rb_root *root = &sbi->inode_tree;
+
+	spin_lock(&sbi->inode_tree_lock);
+	ei->i_pos = 0;
+	if (!RB_EMPTY_NODE(&ei->i_rbnode)) {
+		rb_erase(&ei->i_rbnode, root);
+		RB_CLEAR_NODE(&ei->i_rbnode);
+	}
+	spin_unlock(&sbi->inode_tree_lock);
 
 	if (S_ISDIR(inode->i_mode) && sbi->options.nfs) {
-		spin_lock(&sbi->dir_hash_lock);
-		hlist_del_init(&MSDOS_I(inode)->i_dir_hash);
-		spin_unlock(&sbi->dir_hash_lock);
+		root = &sbi->dir_tree;
+		spin_lock(&sbi->dir_tree_lock);
+		if (!RB_EMPTY_NODE(&ei->d_rbnode)) {
+			rb_erase(&ei->d_rbnode, root);
+			RB_CLEAR_NODE(&ei->d_rbnode);
+		}
+		spin_unlock(&sbi->dir_tree_lock);
 	}
 }
 EXPORT_SYMBOL_GPL(fat_detach);
@@ -449,20 +480,26 @@ EXPORT_SYMBOL_GPL(fat_detach);
 struct inode *fat_iget(struct super_block *sb, loff_t i_pos)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	struct hlist_head *head = sbi->inode_hashtable + fat_hash(i_pos);
+	struct rb_node *node = sbi->inode_tree.rb_node;
 	struct msdos_inode_info *i;
 	struct inode *inode = NULL;
 
-	spin_lock(&sbi->inode_hash_lock);
-	hlist_for_each_entry(i, head, i_fat_hash) {
+	spin_lock(&sbi->inode_tree_lock);
+	while (node) {
+		i = rb_entry(node, struct msdos_inode_info, i_rbnode);
 		BUG_ON(i->vfs_inode.i_sb != sb);
-		if (i->i_pos != i_pos)
-			continue;
-		inode = igrab(&i->vfs_inode);
-		if (inode)
-			break;
+		if (i_pos == i->i_pos) {
+			inode = igrab(&i->vfs_inode);
+			if (inode)
+				break;
+		}
+
+		if (i_pos < i->i_pos)
+			node = node->rb_left;
+		else
+			node = node->rb_right;
 	}
-	spin_unlock(&sbi->inode_hash_lock);
+	spin_unlock(&sbi->inode_tree_lock);
 	return inode;
 }
 
@@ -771,9 +808,10 @@ static void init_once(void *foo)
 	spin_lock_init(&ei->cache_lru_lock);
 	ei->nr_caches = 0;
 	ei->cache_valid_id = FAT_CACHE_VALID + 1;
+	ei->hint_cpos = 0;
 	INIT_LIST_HEAD(&ei->cache_lru);
-	INIT_HLIST_NODE(&ei->i_fat_hash);
-	INIT_HLIST_NODE(&ei->i_dir_hash);
+	RB_CLEAR_NODE(&ei->i_rbnode);
+	RB_CLEAR_NODE(&ei->d_rbnode);
 	inode_init_once(&ei->vfs_inode);
 }
 
@@ -868,9 +906,9 @@ retry:
 		       "for updating (i_pos %lld)", i_pos);
 		return -EIO;
 	}
-	spin_lock(&sbi->inode_hash_lock);
+	spin_lock(&sbi->inode_tree_lock);
 	if (i_pos != MSDOS_I(inode)->i_pos) {
-		spin_unlock(&sbi->inode_hash_lock);
+		spin_unlock(&sbi->inode_tree_lock);
 		brelse(bh);
 		goto retry;
 	}
@@ -891,7 +929,7 @@ retry:
 		fat_time_unix2fat(sbi, &inode->i_atime, &atime,
 				  &raw_entry->adate, NULL);
 	}
-	spin_unlock(&sbi->inode_hash_lock);
+	spin_unlock(&sbi->inode_tree_lock);
 	mark_buffer_dirty(bh);
 	err = 0;
 	if (wait)
@@ -1807,8 +1845,8 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 		sbi->prev_free = FAT_START_ENT;
 
 	/* set up enough so that it can read an inode */
-	fat_hash_init(sb);
-	dir_hash_init(sb);
+	fat_inode_tree_init(sb);
+	fat_dir_tree_init(sb);
 	fat_ent_access_init(sb);
 
 	/*
